@@ -1,6 +1,8 @@
-import { Lexer } from '../../lib/marked.esm.js';
-import { describe, it } from 'node:test';
-import assert from 'node:assert';
+import { deepEquals } from 'bun';
+import { describe, it } from 'bun:test';
+
+import { Lexer } from '../../src/Tokenizer';
+
 
 function expectTokens({ md, options, tokens = [], links = {}, log = false }) {
   const lexer = new Lexer(options);
@@ -14,7 +16,7 @@ function expectTokens({ md, options, tokens = [], links = {}, log = false }) {
       2,
     ));
   }
-  assert.deepEqual(actual, expected);
+  deepEquals(actual, expected);
 }
 
 function expectInlineTokens({ md, options, tokens, links = {} }) {
@@ -22,7 +24,7 @@ function expectInlineTokens({ md, options, tokens, links = {} }) {
   lexer.tokens.links = links;
   const outTokens = [];
   lexer.inlineTokens(md, outTokens);
-  assert.deepEqual(outTokens, tokens);
+  deepEquals(outTokens, tokens);
 }
 
 describe('Lexer', () => {

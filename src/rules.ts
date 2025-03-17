@@ -213,39 +213,6 @@ const blockGfm: Record<BlockKeys, RegExp> = {
 };
 
 /**
- * Pedantic grammar (original John Gruber's loose markdown specification)
- */
-
-const blockPedantic: Record<BlockKeys, RegExp> = {
-  ...blockNormal,
-  html: edit(
-    '^ *(?:comment *(?:\\n|\\s*$)'
-    + '|<(tag)[\\s\\S]+?</\\1> *(?:\\n{2,}|\\s*$)' // closed tag
-    + '|<tag(?:"[^"]*"|\'[^\']*\'|\\s[^\'"/>\\s]*)*?/?> *(?:\\n{2,}|\\s*$))')
-    .replace('comment', _comment)
-    .replace(/tag/g, '(?!(?:'
-      + 'a|em|strong|small|s|cite|q|dfn|abbr|data|time|code|var|samp|kbd|sub'
-      + '|sup|i|b|u|mark|ruby|rt|rp|bdi|bdo|span|br|wbr|ins|del|img)'
-      + '\\b)\\w+(?!:|[^\\w\\s@]*@)\\b')
-    .getRegex(),
-  def: /^ *\[([^\]]+)\]: *<?([^\s>]+)>?(?: +(["(][^\n]+[")]))? *(?:\n+|$)/,
-  heading: /^(#{1,6})(.*)(?:\n+|$)/,
-  fences: noopTest, // fences not supported
-  lheading: /^(.+?)\n {0,3}(=+|-+) *(?:\n+|$)/,
-  paragraph: edit(_paragraph)
-    .replace('hr', hr)
-    .replace('heading', ' *#{1,6} *[^\n]')
-    .replace('lheading', lheading)
-    .replace('|table', '')
-    .replace('blockquote', ' {0,3}>')
-    .replace('|fences', '')
-    .replace('|list', '')
-    .replace('|html', '')
-    .replace('|tag', '')
-    .getRegex(),
-};
-
-/**
  * Inline-Level Grammar
  */
 
@@ -386,19 +353,6 @@ const inlineNormal = {
 
 type InlineKeys = keyof typeof inlineNormal;
 
-/**
- * Pedantic Inline Grammar
- */
-
-const inlinePedantic: Record<InlineKeys, RegExp> = {
-  ...inlineNormal,
-  link: edit(/^!?\[(label)\]\((.*?)\)/)
-    .replace('label', _inlineLabel)
-    .getRegex(),
-  reflink: edit(/^!?\[(label)\]\s*\[([^\]]*)\]/)
-    .replace('label', _inlineLabel)
-    .getRegex(),
-};
 
 /**
  * GFM Inline Grammar
@@ -436,14 +390,12 @@ const inlineBreaks: Record<InlineKeys, RegExp> = {
 export const block = {
   normal: blockNormal,
   gfm: blockGfm,
-  pedantic: blockPedantic,
 };
 
 export const inline = {
   normal: inlineNormal,
   gfm: inlineGfm,
   breaks: inlineBreaks,
-  pedantic: inlinePedantic,
 };
 
 export interface Rules {

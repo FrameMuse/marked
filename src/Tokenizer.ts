@@ -1,15 +1,12 @@
-import { _defaults } from './defaults.ts';
 import {
   rtrim,
   splitCells,
   findClosingBracket,
-} from './helpers.ts';
-import type { Rules } from './rules.ts';
-import type { _Lexer } from './Lexer.ts';
-import type { Links, Tokens, Token } from './Tokens.ts';
-import type { MarkedOptions } from './MarkedOptions.ts';
+} from './helpers';
+import { block, inline, other, type Rules } from './rules';
+import type { Links, Tokens, Token, TokensList } from './Tokens';
 
-function outputLink(cap: string[], link: Pick<Tokens.Link, 'href' | 'title'>, raw: string, lexer: _Lexer, rules: Rules): Tokens.Link | Tokens.Image {
+function outputLink(cap: string[], link: Pick<Tokens.Link, 'href' | 'title'>, raw: string, lexer: Lexer, rules: Rules): Tokens.Link | Tokens.Image {
   const href = link.href;
   const title = link.title || null;
   const text = cap[1].replace(rules.other.outputLinkReplace, '$1');
@@ -38,10 +35,7 @@ function outputLink(cap: string[], link: Pick<Tokens.Link, 'href' | 'title'>, ra
 
 function indentCodeCompensation(raw: string, text: string, rules: Rules) {
   const matchIndentToCode = raw.match(rules.other.indentCodeCompensation);
-
-  if (matchIndentToCode === null) {
-    return text;
-  }
+  if (matchIndentToCode == null) return text;
 
   const indentToCode = matchIndentToCode[1];
 
@@ -64,17 +58,421 @@ function indentCodeCompensation(raw: string, text: string, rules: Rules) {
     .join('\n');
 }
 
-/**
- * Tokenizer
- */
-export class _Tokenizer {
-  options: MarkedOptions;
-  rules!: Rules; // set by the lexer
-  lexer!: _Lexer; // set by the lexer
 
-  constructor(options?: MarkedOptions) {
-    this.options = options || _defaults;
+
+type ExtensionIndexer = (this: { lexer: Lexer }, src: string) => number
+type ExtensionTokenizer = (this: { lexer: Lexer }, src: string, tokens: Token[]) => Token
+
+
+interface LexerOptions {
+  extensions?: {
+    startBlock?: ExtensionIndexer[]
+
+    inline?: ExtensionTokenizer[]
+    startInline?: ExtensionIndexer[]
+  };
+  gfm?: boolean
+  gfmLineBreaks?: boolean
+}
+
+/** 
+ * Fully compatible `Lexer` forked from [Marked](https://github.com/markedjs/marked).
+ * 
+ * The only change made is removing code that is not a part of `Lexer` to reduce the size.
+ */
+export class Lexer {
+  rules: Rules;
+  tokens: TokensList;
+  state = {
+    inLink: false,
+    inRawBlock: false,
+    top: true,
   }
+
+
+  constructor(public options: LexerOptions = {}) {
+    // TokenList cannot be created in one go
+    this.tokens = [] as never;
+    this.tokens.links = {}
+
+    this.rules = {
+      other,
+      block: block.normal,
+      inline: inline.normal,
+    }
+
+    if (this.options.gfm) {
+      this.rules.block = block.gfm;
+      this.rules.inline = inline.gfm;
+
+      if (this.options.gfmLineBreaks) {
+        this.rules.inline = inline.breaks;
+      }
+    }
+  }
+
+
+  private inlineQueue: { src: string, tokens: Token[] }[] = []
+
+  lex(src: string) {
+    src = src.replace(other.carriageReturn, '\n');
+
+    this.blockTokens(src, this.tokens);
+
+    for (let i = 0; i < this.inlineQueue.length; i++) {
+      const next = this.inlineQueue[i];
+      this.inlineTokens(next.src, next.tokens);
+    }
+    this.inlineQueue = [];
+
+    return this.tokens;
+  }
+
+
+  /**
+   * Lexing
+   */
+  blockTokens(src: string, tokens?: Token[], lastParagraphClipped?: boolean): Token[];
+  blockTokens(src: string, tokens?: TokensList, lastParagraphClipped?: boolean): TokensList;
+  blockTokens(src: string, tokens: Token[] = [], lastParagraphClipped = false) {
+    while (src) {
+      let token: Tokens.Generic | undefined;
+
+      // newline
+      if (token = this.space(src)) {
+        src = src.substring(token.raw.length);
+        const lastToken = tokens.at(-1);
+        if (token.raw.length === 1 && lastToken !== undefined) {
+          // if there's a single \n as a spacer, it's terminating the last line,
+          // so move it there so that we don't get unnecessary paragraph tags
+          lastToken.raw += '\n';
+        } else {
+          tokens.push(token);
+        }
+        continue;
+      }
+
+      // code
+      if (token = this.code(src)) {
+        src = src.substring(token.raw.length);
+        const lastToken = tokens.at(-1);
+        // An indented code block cannot interrupt a paragraph.
+        if (lastToken?.type === 'paragraph' || lastToken?.type === 'text') {
+          lastToken.raw += '\n' + token.raw;
+          lastToken.text += '\n' + token.text;
+          this.inlineQueue.at(-1)!.src = lastToken.text;
+        } else {
+          tokens.push(token);
+        }
+        continue;
+      }
+
+      // fences
+      if (token = this.fences(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // heading
+      if (token = this.heading(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // hr
+      if (token = this.hr(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // blockquote
+      if (token = this.blockquote(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // list
+      if (token = this.list(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // html
+      if (token = this.html(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // def
+      if (token = this.def(src)) {
+        src = src.substring(token.raw.length);
+        const lastToken = tokens.at(-1);
+        if (lastToken?.type === 'paragraph' || lastToken?.type === 'text') {
+          lastToken.raw += '\n' + token.raw;
+          lastToken.text += '\n' + token.raw;
+          this.inlineQueue.at(-1)!.src = lastToken.text;
+        } else if (!this.tokens.links[token.tag]) {
+          this.tokens.links[token.tag] = {
+            href: token.href,
+            title: token.title,
+          };
+        }
+        continue;
+      }
+
+      // table (gfm)
+      if (token = this.table(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // lheading
+      if (token = this.lheading(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // top-level paragraph
+      // prevent paragraph consuming extensions by clipping 'src' to extension start
+      let cutSrc = src;
+      if (this.options.extensions?.startBlock) {
+        let startIndex = Infinity;
+        const tempSrc = src.slice(1);
+        let tempStart;
+        this.options.extensions.startBlock.forEach((getStartIndex) => {
+          tempStart = getStartIndex.call({ lexer: this }, tempSrc);
+          if (typeof tempStart === 'number' && tempStart >= 0) {
+            startIndex = Math.min(startIndex, tempStart);
+          }
+        });
+        if (startIndex < Infinity && startIndex >= 0) {
+          cutSrc = src.substring(0, startIndex + 1);
+        }
+      }
+      if (this.state.top && (token = this.paragraph(cutSrc))) {
+        const lastToken = tokens.at(-1);
+        if (lastParagraphClipped && lastToken?.type === 'paragraph') {
+          lastToken.raw += '\n' + token.raw;
+          lastToken.text += '\n' + token.text;
+          this.inlineQueue.pop();
+          this.inlineQueue.at(-1)!.src = lastToken.text;
+        } else {
+          tokens.push(token);
+        }
+        lastParagraphClipped = cutSrc.length !== src.length;
+        src = src.substring(token.raw.length);
+        continue;
+      }
+
+      // text
+      if (token = this.text(src)) {
+        src = src.substring(token.raw.length);
+        const lastToken = tokens.at(-1);
+        if (lastToken?.type === 'text') {
+          lastToken.raw += '\n' + token.raw;
+          lastToken.text += '\n' + token.text;
+          this.inlineQueue.pop();
+          this.inlineQueue.at(-1)!.src = lastToken.text;
+        } else {
+          tokens.push(token);
+        }
+        continue;
+      }
+
+      if (src) {
+        throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
+      }
+    }
+
+    this.state.top = true;
+    return tokens;
+  }
+
+  inline(src: string, tokens: Token[] = []) {
+    this.inlineQueue.push({ src, tokens });
+    return tokens;
+  }
+
+  /**
+   * Lexing/Compiling
+   */
+  inlineTokens(src: string, tokens: Token[] = []): Token[] {
+    // String with links masked to avoid interference with em and strong
+    let maskedSrc = src;
+    let match: RegExpExecArray | null = null;
+
+    // Mask out reflinks
+    if (this.tokens.links) {
+      const links = Object.keys(this.tokens.links);
+      if (links.length > 0) {
+        while ((match = this.rules.inline.reflinkSearch.exec(maskedSrc)) != null) {
+          if (links.includes(match[0].slice(match[0].lastIndexOf('[') + 1, -1))) {
+            maskedSrc = maskedSrc.slice(0, match.index)
+              + '[' + 'a'.repeat(match[0].length - 2) + ']'
+              + maskedSrc.slice(this.rules.inline.reflinkSearch.lastIndex);
+          }
+        }
+      }
+    }
+    // Mask out other blocks
+    while ((match = this.rules.inline.blockSkip.exec(maskedSrc)) != null) {
+      maskedSrc = maskedSrc.slice(0, match.index) + '[' + 'a'.repeat(match[0].length - 2) + ']' + maskedSrc.slice(this.rules.inline.blockSkip.lastIndex);
+    }
+
+    // Mask out escaped characters
+    while ((match = this.rules.inline.anyPunctuation.exec(maskedSrc)) != null) {
+      maskedSrc = maskedSrc.slice(0, match.index) + '++' + maskedSrc.slice(this.rules.inline.anyPunctuation.lastIndex);
+    }
+
+    let keepPrevChar = false;
+    let prevChar = '';
+    while (src) {
+      if (!keepPrevChar) {
+        prevChar = '';
+      }
+      keepPrevChar = false;
+
+      let token: Tokens.Generic | undefined;
+
+      // extensions
+      if (this.options.extensions?.inline?.some((extTokenizer) => {
+        if (token = extTokenizer.call({ lexer: this }, src, tokens)) {
+          src = src.substring(token.raw.length);
+          tokens.push(token);
+          return true;
+        }
+        return false;
+      })) {
+        continue;
+      }
+
+      // escape
+      if (token = this.escape(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // tag
+      if (token = this.tag(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // link
+      if (token = this.link(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // reflink, nolink
+      if (token = this.reflink(src, this.tokens.links)) {
+        src = src.substring(token.raw.length);
+        const lastToken = tokens.at(-1);
+        if (token.type === 'text' && lastToken?.type === 'text') {
+          lastToken.raw += token.raw;
+          lastToken.text += token.text;
+        } else {
+          tokens.push(token);
+        }
+        continue;
+      }
+
+      // em & strong
+      if (token = this.emStrong(src, maskedSrc, prevChar)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // code
+      if (token = this.codespan(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // br
+      if (token = this.br(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // del (gfm)
+      if (token = this.del(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // autolink
+      if (token = this.autolink(src)) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // url (gfm)
+      if (!this.state.inLink && (token = this.url(src))) {
+        src = src.substring(token.raw.length);
+        tokens.push(token);
+        continue;
+      }
+
+      // text
+      // prevent inlineText consuming extensions by clipping 'src' to extension start
+      let cutSrc = src;
+      if (this.options.extensions?.startInline) {
+        let startIndex = Infinity;
+        const tempSrc = src.slice(1);
+        let tempStart;
+        this.options.extensions.startInline.forEach((getStartIndex) => {
+          tempStart = getStartIndex.call({ lexer: this }, tempSrc);
+          if (typeof tempStart === 'number' && tempStart >= 0) {
+            startIndex = Math.min(startIndex, tempStart);
+          }
+        });
+        if (startIndex < Infinity && startIndex >= 0) {
+          cutSrc = src.substring(0, startIndex + 1);
+        }
+      }
+      if (token = this.inlineText(cutSrc)) {
+        src = src.substring(token.raw.length);
+        if (token.raw.slice(-1) !== '_') { // Track prevChar before string of ____ started
+          prevChar = token.raw.slice(-1);
+        }
+        keepPrevChar = true;
+        const lastToken = tokens.at(-1);
+        if (lastToken?.type === 'text') {
+          lastToken.raw += token.raw;
+          lastToken.text += token.text;
+        } else {
+          tokens.push(token);
+        }
+        continue;
+      }
+
+      if (src) {
+        throw new Error('Infinite loop on byte: ' + src.charCodeAt(0));
+      }
+    }
+
+    return tokens;
+  }
+
+
+  // --- Lexicon --- //
 
   space(src: string): Tokens.Space | undefined {
     const cap = this.rules.block.newline.exec(src);
@@ -94,9 +492,7 @@ export class _Tokenizer {
         type: 'code',
         raw: cap[0],
         codeBlockStyle: 'indented',
-        text: !this.options.pedantic
-          ? rtrim(text, '\n')
-          : text,
+        text: rtrim(text, '\n')
       };
     }
   }
@@ -124,9 +520,7 @@ export class _Tokenizer {
       // remove trailing #s
       if (this.rules.other.endingHash.test(text)) {
         const trimmed = rtrim(text, '#');
-        if (this.options.pedantic) {
-          text = trimmed.trim();
-        } else if (!trimmed || this.rules.other.endingSpaceChar.test(trimmed)) {
+        if (!trimmed || this.rules.other.endingSpaceChar.test(trimmed)) {
           // CommonMark requires space before trailing #s
           text = trimmed.trim();
         }
@@ -137,7 +531,7 @@ export class _Tokenizer {
         raw: cap[0],
         depth: cap[1].length,
         text,
-        tokens: this.lexer.inline(text),
+        tokens: this.inline(text),
       };
     }
   }
@@ -188,10 +582,10 @@ export class _Tokenizer {
 
         // parse blockquote lines as top level tokens
         // merge paragraphs if this is a continuation
-        const top = this.lexer.state.top;
-        this.lexer.state.top = true;
-        this.lexer.blockTokens(currentText, tokens, true);
-        this.lexer.state.top = top;
+        const top = this.state.top;
+        this.state.top = true;
+        this.blockTokens(currentText, tokens, true);
+        this.state.top = top;
 
         // if there is no continuation then we are done
         if (lines.length === 0) {
@@ -253,10 +647,6 @@ export class _Tokenizer {
 
       bull = isordered ? `\\d{1,9}\\${bull.slice(-1)}` : `\\${bull}`;
 
-      if (this.options.pedantic) {
-        bull = isordered ? bull : '[*+-]';
-      }
-
       // Get next list item
       const itemRegex = this.rules.other.listItemRegex(bull);
       let endsWithBlankLine = false;
@@ -281,10 +671,7 @@ export class _Tokenizer {
         let blankLine = !line.trim();
 
         let indent = 0;
-        if (this.options.pedantic) {
-          indent = 2;
-          itemContents = line.trimStart();
-        } else if (blankLine) {
+        if (blankLine) {
           indent = cap[1].length + 1;
         } else {
           indent = cap[2].search(this.rules.other.nonSpaceChar); // Find first non-space char
@@ -313,12 +700,7 @@ export class _Tokenizer {
             nextLine = rawLine;
 
             // Re-align to follow commonmark nesting rules
-            if (this.options.pedantic) {
-              nextLine = nextLine.replace(this.rules.other.listReplaceNesting, '  ');
-              nextLineWithoutTabs = nextLine;
-            } else {
-              nextLineWithoutTabs = nextLine.replace(this.rules.other.tabCharGlobal, '    ');
-            }
+            nextLineWithoutTabs = nextLine.replace(this.rules.other.tabCharGlobal, '    ');
 
             // End list item if found code fences
             if (fencesBeginRegex.test(nextLine)) {
@@ -426,8 +808,8 @@ export class _Tokenizer {
 
       // Item child tokens handled here at end because we needed to have the final item to trim it first
       for (let i = 0; i < list.items.length; i++) {
-        this.lexer.state.top = false;
-        list.items[i].tokens = this.lexer.blockTokens(list.items[i].text, []);
+        this.state.top = false;
+        list.items[i].tokens = this.blockTokens(list.items[i].text, []);
 
         if (!list.loose) {
           // Check if list should be loose
@@ -522,7 +904,7 @@ export class _Tokenizer {
     for (let i = 0; i < headers.length; i++) {
       item.header.push({
         text: headers[i],
-        tokens: this.lexer.inline(headers[i]),
+        tokens: this.inline(headers[i]),
         header: true,
         align: item.align[i],
       });
@@ -532,7 +914,7 @@ export class _Tokenizer {
       item.rows.push(splitCells(row, item.header.length).map((cell, i) => {
         return {
           text: cell,
-          tokens: this.lexer.inline(cell),
+          tokens: this.inline(cell),
           header: false,
           align: item.align[i],
         };
@@ -550,7 +932,7 @@ export class _Tokenizer {
         raw: cap[0],
         depth: cap[2].charAt(0) === '=' ? 1 : 2,
         text: cap[1],
-        tokens: this.lexer.inline(cap[1]),
+        tokens: this.inline(cap[1]),
       };
     }
   }
@@ -565,7 +947,7 @@ export class _Tokenizer {
         type: 'paragraph',
         raw: cap[0],
         text,
-        tokens: this.lexer.inline(text),
+        tokens: this.inline(text),
       };
     }
   }
@@ -577,7 +959,7 @@ export class _Tokenizer {
         type: 'text',
         raw: cap[0],
         text: cap[0],
-        tokens: this.lexer.inline(cap[0]),
+        tokens: this.inline(cap[0]),
       };
     }
   }
@@ -596,22 +978,22 @@ export class _Tokenizer {
   tag(src: string): Tokens.Tag | undefined {
     const cap = this.rules.inline.tag.exec(src);
     if (cap) {
-      if (!this.lexer.state.inLink && this.rules.other.startATag.test(cap[0])) {
-        this.lexer.state.inLink = true;
-      } else if (this.lexer.state.inLink && this.rules.other.endATag.test(cap[0])) {
-        this.lexer.state.inLink = false;
+      if (!this.state.inLink && this.rules.other.startATag.test(cap[0])) {
+        this.state.inLink = true;
+      } else if (this.state.inLink && this.rules.other.endATag.test(cap[0])) {
+        this.state.inLink = false;
       }
-      if (!this.lexer.state.inRawBlock && this.rules.other.startPreScriptTag.test(cap[0])) {
-        this.lexer.state.inRawBlock = true;
-      } else if (this.lexer.state.inRawBlock && this.rules.other.endPreScriptTag.test(cap[0])) {
-        this.lexer.state.inRawBlock = false;
+      if (!this.state.inRawBlock && this.rules.other.startPreScriptTag.test(cap[0])) {
+        this.state.inRawBlock = true;
+      } else if (this.state.inRawBlock && this.rules.other.endPreScriptTag.test(cap[0])) {
+        this.state.inRawBlock = false;
       }
 
       return {
         type: 'html',
         raw: cap[0],
-        inLink: this.lexer.state.inLink,
-        inRawBlock: this.lexer.state.inRawBlock,
+        inLink: this.state.inLink,
+        inRawBlock: this.state.inRawBlock,
         block: false,
         text: cap[0],
       };
@@ -620,58 +1002,45 @@ export class _Tokenizer {
 
   link(src: string): Tokens.Link | Tokens.Image | undefined {
     const cap = this.rules.inline.link.exec(src);
-    if (cap) {
-      const trimmedUrl = cap[2].trim();
-      if (!this.options.pedantic && this.rules.other.startAngleBracket.test(trimmedUrl)) {
-        // commonmark requires matching angle brackets
-        if (!(this.rules.other.endAngleBracket.test(trimmedUrl))) {
-          return;
-        }
+    if (cap == null) return
 
-        // ending angle bracket cannot be escaped
-        const rtrimSlash = rtrim(trimmedUrl.slice(0, -1), '\\');
-        if ((trimmedUrl.length - rtrimSlash.length) % 2 === 0) {
-          return;
-        }
-      } else {
-        // find closing parenthesis
-        const lastParenIndex = findClosingBracket(cap[2], '()');
-        if (lastParenIndex > -1) {
-          const start = cap[0].indexOf('!') === 0 ? 5 : 4;
-          const linkLen = start + cap[1].length + lastParenIndex;
-          cap[2] = cap[2].substring(0, lastParenIndex);
-          cap[0] = cap[0].substring(0, linkLen).trim();
-          cap[3] = '';
-        }
-      }
-      let href = cap[2];
-      let title = '';
-      if (this.options.pedantic) {
-        // split pedantic href and title
-        const link = this.rules.other.pedanticHrefTitle.exec(href);
-
-        if (link) {
-          href = link[1];
-          title = link[3];
-        }
-      } else {
-        title = cap[3] ? cap[3].slice(1, -1) : '';
+    const trimmedUrl = cap[2].trim();
+    if (this.rules.other.startAngleBracket.test(trimmedUrl)) {
+      // commonmark requires matching angle brackets
+      if (!(this.rules.other.endAngleBracket.test(trimmedUrl))) {
+        return;
       }
 
-      href = href.trim();
-      if (this.rules.other.startAngleBracket.test(href)) {
-        if (this.options.pedantic && !(this.rules.other.endAngleBracket.test(trimmedUrl))) {
-          // pedantic allows starting angle bracket without ending angle bracket
-          href = href.slice(1);
-        } else {
-          href = href.slice(1, -1);
-        }
+      // ending angle bracket cannot be escaped
+      const rtrimSlash = rtrim(trimmedUrl.slice(0, -1), '\\');
+      if ((trimmedUrl.length - rtrimSlash.length) % 2 === 0) {
+        return;
       }
-      return outputLink(cap, {
-        href: href ? href.replace(this.rules.inline.anyPunctuation, '$1') : href,
-        title: title ? title.replace(this.rules.inline.anyPunctuation, '$1') : title,
-      }, cap[0], this.lexer, this.rules);
+    } else {
+      // find closing parenthesis
+      const lastParenIndex = findClosingBracket(cap[2], '()');
+      if (lastParenIndex > -1) {
+        const start = cap[0].indexOf('!') === 0 ? 5 : 4;
+        const linkLen = start + cap[1].length + lastParenIndex;
+        cap[2] = cap[2].substring(0, lastParenIndex);
+        cap[0] = cap[0].substring(0, linkLen).trim();
+        cap[3] = '';
+      }
     }
+
+    let href = cap[2];
+    let title = '';
+    title = cap[3] ? cap[3].slice(1, -1) : '';
+
+
+    href = href.trim();
+    if (this.rules.other.startAngleBracket.test(href)) {
+      href = href.slice(1, -1);
+    }
+    return outputLink(cap, {
+      href: href ? href.replace(this.rules.inline.anyPunctuation, '$1') : href,
+      title: title ? title.replace(this.rules.inline.anyPunctuation, '$1') : title,
+    }, cap[0], this, this.rules);
   }
 
   reflink(src: string, links: Links): Tokens.Link | Tokens.Image | Tokens.Text | undefined {
@@ -688,7 +1057,7 @@ export class _Tokenizer {
           text,
         };
       }
-      return outputLink(cap, link, cap[0], this.lexer, this.rules);
+      return outputLink(cap, link, cap[0], this, this.rules);
     }
   }
 
@@ -746,7 +1115,7 @@ export class _Tokenizer {
             type: 'em',
             raw,
             text,
-            tokens: this.lexer.inlineTokens(text),
+            tokens: this.inlineTokens(text),
           };
         }
 
@@ -756,7 +1125,7 @@ export class _Tokenizer {
           type: 'strong',
           raw,
           text,
-          tokens: this.lexer.inlineTokens(text),
+          tokens: this.inlineTokens(text),
         };
       }
     }
@@ -796,7 +1165,7 @@ export class _Tokenizer {
         type: 'del',
         raw: cap[0],
         text: cap[2],
-        tokens: this.lexer.inlineTokens(cap[2]),
+        tokens: this.inlineTokens(cap[2]),
       };
     }
   }
@@ -869,7 +1238,7 @@ export class _Tokenizer {
   inlineText(src: string): Tokens.Text | undefined {
     const cap = this.rules.inline.text.exec(src);
     if (cap) {
-      const escaped = this.lexer.state.inRawBlock;
+      const escaped = this.state.inRawBlock;
       return {
         type: 'text',
         raw: cap[0],
