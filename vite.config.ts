@@ -8,6 +8,8 @@ export default defineConfig({
     sourcemap: true,
     emptyOutDir: true,
 
+    target: false,
+
     lib: {
       entry: "./src/index.ts",
       formats: ["es"],
@@ -15,6 +17,9 @@ export default defineConfig({
     }
   },
   esbuild: {
-    keepNames: false
+    keepNames: false,
+
+    mangleProps: /^_/,
+    mangleQuoted: true,
   },
 })

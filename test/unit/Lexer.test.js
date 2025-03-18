@@ -1,7 +1,7 @@
 import { deepEquals } from 'bun';
 import { describe, it } from 'bun:test';
 
-import { Lexer } from '../../src/Tokenizer';
+import { Lexer } from '../../build/index';
 
 
 function expectTokens({ md, options, tokens = [], links = {}, log = false }) {

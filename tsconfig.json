@@ -5,11 +5,17 @@
     "isolatedModules": true,
     "strict": true,
     "verbatimModuleSyntax": true,
-    "noEmit": true,
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "skipLibCheck": true,
+    "noCheck": true,
+    "declarationDir": "build",
+    "noEmitOnError": false,
     "allowSyntheticDefaultImports": true,
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
-    "sourceMap": false
+    "sourceMap": false,
   },
   "include": [
     "src/*.ts"
